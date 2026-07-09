@@ -230,6 +230,7 @@ async def completions(
                         yield "data: [DONE]\n\n"
                         success = True
                         logger.info("cli stream ok: %s/%s %s", attempt + 1, max_retries + 1, model)
+                        return
 
                     except UpstreamError as exc:
                         fail_exc = exc
@@ -256,6 +257,8 @@ async def completions(
                         continue
                     if not success and fail_exc:
                         raise fail_exc
+
+            raise RateLimitError("No CLI accounts with a valid access token — import tokens and wait for OAuth")
 
         return _run_stream()
 
