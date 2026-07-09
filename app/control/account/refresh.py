@@ -734,5 +734,62 @@ class AccountRefreshService:
             logger.info("cli token refresh completed: refreshed=%s", refreshed)
         return refreshed
 
+    async def fill_missing_cli_tokens(self) -> int:
+        """Startup scan — fill CLI tokens for all active accounts that lack them.
+
+        Uses the SSO token to run full OAuth PKCE flow.
+        Only processes accounts that are NOT deleted and have NO cli_access_token.
+
+        Returns:
+            Number of tokens successfully acquired.
+        """
+        from app.platform.runtime.clock import now_ms
+        from app.dataplane.reverse.protocol.xai_oauth import acquire_cli_token
+        from .commands import AccountPatch
+
+        filled = 0
+        skipped = 0
+
+        try:
+            page = await self._repo.list_accounts(ListAccountsQuery(page=1, page_size=2000))
+        except Exception as exc:
+            logger.warning("cli fill missing list failed: %s", exc)
+            return 0
+
+        for record in page.items:
+            if record.is_deleted():
+                continue
+            if record.ext.get("cli_access_token"):
+                skipped += 1
+                continue
+            if record.status != AccountStatus.ACTIVE:
+                continue
+
+            try:
+                result = await acquire_cli_token(record.token)
+            except Exception as exc:
+                logger.warning("cli fill acquire failed: token=%s... error=%s", record.token[:8], exc)
+                continue
+
+            expires_at = now_ms() + result["expires_in"] * 1000
+            try:
+                await self._repo.patch_accounts([AccountPatch(
+                    token=record.token,
+                    ext_merge={
+                        "cli_access_token": result["access_token"],
+                        "cli_refresh_token": result["refresh_token"],
+                        "cli_expires_at": expires_at,
+                        "cli_email": result.get("email", ""),
+                        "cli_sub": result.get("sub", ""),
+                    },
+                )])
+                filled += 1
+                logger.info("cli token filled: token=%s... email=%s", record.token[:8], result.get("email", ""))
+            except Exception as exc:
+                logger.warning("cli fill persist failed: token=%s... error=%s", record.token[:8], exc)
+
+        logger.info("cli fill missing completed: filled=%s skipped=%s", filled, skipped)
+        return filled
+
 
 __all__ = ["AccountRefreshService", "RefreshResult"]

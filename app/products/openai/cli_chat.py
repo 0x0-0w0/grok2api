@@ -61,11 +61,11 @@ async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None)
 
 
 async def _get_cli_access_token(ssotoken: str) -> str | None:
-    """Look up cli_access_token, auto-refresh if expired."""
+    """Look up cli_access_token, auto-refresh if expired, lazy-init if missing."""
     try:
         from app.control.account.runtime import get_account_repo
         from app.platform.runtime.clock import now_ms
-        from app.dataplane.reverse.protocol.xai_oauth import refresh_cli_token
+        from app.dataplane.reverse.protocol.xai_oauth import acquire_cli_token, refresh_cli_token
         from app.control.account.commands import AccountPatch
 
         repo = get_account_repo()
@@ -76,8 +76,31 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
             return None
         rec = records[0]
         access_token = rec.ext.get("cli_access_token")
+
         if not access_token:
-            return None
+            # --- Lazy init: no token yet, run full OAuth ---
+            logger.info("cli token missing, lazy acquiring: %s...", ssotoken[:8])
+            try:
+                result = await acquire_cli_token(ssotoken)
+            except Exception as exc:
+                logger.warning("cli lazy acquire failed: %s... error=%s", ssotoken[:8], exc)
+                return None
+            expires_at = now_ms() + result["expires_in"] * 1000
+            try:
+                await repo.patch_accounts([AccountPatch(
+                    token=ssotoken,
+                    ext_merge={
+                        "cli_access_token": result["access_token"],
+                        "cli_refresh_token": result["refresh_token"],
+                        "cli_expires_at": expires_at,
+                        "cli_email": result.get("email", ""),
+                        "cli_sub": result.get("sub", ""),
+                    },
+                )])
+            except Exception as exc:
+                logger.warning("cli lazy persist: %s... error=%s", ssotoken[:8], exc)
+            access_token = result["access_token"]
+            return access_token
 
         expires_at = rec.ext.get("cli_expires_at")
         if expires_at and expires_at <= now_ms():

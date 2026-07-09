@@ -59,6 +59,10 @@ class AccountRefreshScheduler:
         self._tasks.append(
             asyncio.create_task(self._cli_refresh_loop(), name="cli-token-refresh")
         )
+        # One-shot startup fill: acquire CLI tokens for accounts that lack them
+        self._tasks.append(
+            asyncio.create_task(self._fill_missing_on_startup(), name="cli-fill-startup")
+        )
         intervals = {p: _interval(p) for p in _POOL_CONFIG}
         logger.info(
             "account refresh scheduler started: basic_interval_s={} super_interval_s={} heavy_interval_s={}",
@@ -124,6 +128,16 @@ class AccountRefreshScheduler:
                 raise
             except Exception as exc:
                 logger.error("cli token refresh cycle failed: error={}", exc)
+
+    async def _fill_missing_on_startup(self) -> None:
+        """One-shot: acquire CLI tokens for accounts that lack them."""
+        try:
+            count = await self._service.fill_missing_cli_tokens()
+            logger.info("cli fill missing on startup completed: filled=%s", count)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("cli fill missing on startup failed: error=%s", exc)
 
 
 # ---------------------------------------------------------------------------
