@@ -585,6 +585,7 @@ async def _refresh_then_auto_nsfw(
 async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str]) -> None:
     """Acquire Grok CLI OAuth tokens for each SSO token and persist via ext_merge."""
     pending: list[AccountPatch] = []
+    batch_size = max(len(tokens) // 10, 1)
     for token in tokens:
         await _import_limiter.acquire()
         success = False
@@ -624,8 +625,8 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
         ))
         logger.info("admin import oauth acquired: token={} email={} expires_at={}", _mask(token), result.get("email", ""), expires_at)
 
-        # Commit every 10 tokens so recently-imported accounts can serve requests
-        if len(pending) >= 10:
+        # Commit at each 1/10 progress so accounts are available ASAP
+        if len(pending) >= batch_size:
             try:
                 await repo.patch_accounts(pending)
                 logger.info("admin import oauth batch persisted: count={}", len(pending))
