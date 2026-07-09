@@ -493,7 +493,7 @@ async def completions(
     # ── CLI API 路由 (api.x.ai/v1/responses) ────────────────────────────────
     if spec.is_cli_chat():
         from .cli_chat import completions as cli_completions
-        return await cli_completions(
+        result = await cli_completions(
             model=model,
             messages=messages,
             stream=is_stream,
@@ -501,6 +501,8 @@ async def completions(
             temperature=temperature,
             top_p=top_p,
         )
+        logger.info("cli dispatch result type=%s", type(result).__name__ if result is not None else None)
+        return result
     # ─────────────────────────────────────────────────────────────────────────
 
     message, files = _extract_message(messages)

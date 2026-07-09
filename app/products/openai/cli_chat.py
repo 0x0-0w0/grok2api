@@ -191,7 +191,9 @@ async def completions(
                         temperature=temperature, top_p=top_p, stream=True,
                     )
                     try:
-                        async for line in stream_cli_chat(access_token, payload, timeout_s=timeout_s):
+                        _gen = stream_cli_chat(access_token, payload, timeout_s=timeout_s)
+                        logger.info("cli stream_chat generator: type=%s", type(_gen))
+                        async for line in _gen:
                             line = line.strip()
                             if not line or not line.startswith("data:"):
                                 continue
