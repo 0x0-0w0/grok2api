@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, RootModel
 
-from app.platform.errors import AppError, ErrorKind, ValidationError
+from app.platform.errors import AppError, ErrorKind, UpstreamError, ValidationError
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
@@ -37,6 +37,45 @@ from . import get_refresh_svc, get_repo
 
 router = APIRouter(tags=["Admin - Tokens"])
 _background_tasks: set[asyncio.Task] = set()
+
+# ---------------------------------------------------------------------------
+# Import rate limiter — max 10 per minute, exponential backoff on 429
+# ---------------------------------------------------------------------------
+
+class ImportRateLimiter:
+    """Token bucket limiter: 10 permits per 60 s, refills at 1/6 s."""
+
+    def __init__(self) -> None:
+        self._sem = asyncio.Semaphore(10)
+        self._refill_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        await self._sem.acquire()
+        async with self._lock:
+            if self._refill_task is None or self._refill_task.done():
+                self._refill_task = asyncio.create_task(self._refill_loop())
+
+    async def _refill_loop(self) -> None:
+        # Release one permit every 6 seconds (10 per 60 s)
+        while True:
+            await asyncio.sleep(6.0)
+            try:
+                self._sem.release()
+            except ValueError:
+                pass  # already at max
+
+
+_import_limiter = ImportRateLimiter()
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with jitter: 1s, 2s, 4s, 8s, 16s... ±25%."""
+    import random
+    base = 2 ** attempt
+    jitter = random.uniform(-0.25, 0.25) * base
+    return max(0.5, base + jitter)
+
 
 # ---------------------------------------------------------------------------
 # Token sanitisation
@@ -546,9 +585,29 @@ async def _refresh_then_auto_nsfw(
 async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str]) -> None:
     """Acquire Grok CLI OAuth tokens for each SSO token and persist via ext_merge."""
     for token in tokens:
+        await _import_limiter.acquire()
+        success = False
+        for attempt in range(5):
+            try:
+                result = await _acquire_cli_oauth(token)
+                success = True
+                break
+            except UpstreamError as exc:
+                if exc.status == 429 and attempt < 4:
+                    delay = _backoff_delay(attempt)
+                    logger.warning(
+                        "import oauth 429: token=%s attempt=%s delay=%.1fs",
+                        _mask(token), attempt, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("admin import oauth failed: token=%s error=%s", _mask(token), exc)
+                return
+        if not success:
+            return
+
+        expires_at = now_ms() + result["expires_in"] * 1000
         try:
-            result = await _acquire_cli_oauth(token)
-            expires_at = now_ms() + result["expires_in"] * 1000
             await repo.patch_accounts([AccountPatch(
                 token=token,
                 ext_merge={
@@ -560,9 +619,9 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
                     "cli_sub": result.get("sub", ""),
                 },
             )])
-            logger.info("admin import oauth acquired: token={} email={} expires_at={}", _mask(token), result.get("email", ""), expires_at)
+            logger.info("admin import oauth acquired: token=%s email=%s expires_at=%s", _mask(token), result.get("email", ""), expires_at)
         except Exception as exc:
-            logger.warning("admin import oauth failed: token={} error={}", _mask(token), exc)
+            logger.warning("admin import oauth persist failed: token=%s error=%s", _mask(token), exc)
 
 
 async def _acquire_cli_oauth(sso_token: str) -> dict:
@@ -587,12 +646,25 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
 
     async def _one(token: str) -> None:
         nonlocal ok_c, fail_c
-        try:
-            await _nsfw_one(repo, token, True)
-            ok_c += 1
-        except Exception as exc:
-            fail_c += 1
-            logger.warning("admin import auto nsfw failed: token={} error={}", _mask(token), exc)
+        await _import_limiter.acquire()
+        for attempt in range(5):
+            try:
+                await _nsfw_one(repo, token, True)
+                ok_c += 1
+                return
+            except UpstreamError as exc:
+                if exc.status == 429 and attempt < 4:
+                    delay = _backoff_delay(attempt)
+                    logger.warning("import nsfw 429: token=%s attempt=%s delay=%.1fs", _mask(token), attempt, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                fail_c += 1
+                logger.warning("admin import auto nsfw failed: token=%s error=%s", _mask(token), exc)
+                return
+            except Exception as exc:
+                fail_c += 1
+                logger.warning("admin import auto nsfw failed: token=%s error=%s", _mask(token), exc)
+                return
 
     await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
     logger.info(
