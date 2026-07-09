@@ -37,7 +37,7 @@ from ._format import (
 def _log_task_exception(task: "asyncio.Task") -> None:
     exc = task.exception() if not task.cancelled() else None
     if exc:
-        logger.warning("bg task failed: %s %s", task.get_name(), exc)
+        logger.warning("bg task failed: {} {}", task.get_name(), exc)
 
 
 async def _quota_sync(token: str, mode_id: int) -> None:
@@ -48,7 +48,7 @@ async def _quota_sync(token: str, mode_id: int) -> None:
         if svc:
             await svc.refresh_call_async(token, mode_id)
     except Exception as exc:
-        logger.warning("cli quota sync: %s... mode=%s %s", token[:10], mode_id, exc)
+        logger.warning("cli quota sync: {}... mode={} {}", token[:10], mode_id, exc)
 
 
 async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None) -> None:
@@ -57,7 +57,7 @@ async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None)
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
     except Exception as e:
-        logger.warning("cli fail sync: %s... mode=%s %s", token[:10], mode_id, e)
+        logger.warning("cli fail sync: {}... mode={} {}", token[:10], mode_id, e)
 
 
 # In-memory cache: ssotoken → access_token (populated before DB commit)
@@ -87,11 +87,11 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
 
         if not access_token:
             # --- Lazy init: no token yet, run full OAuth ---
-            logger.info("cli token missing, lazy acquiring: %s...", ssotoken[:8])
+            logger.info("cli token missing, lazy acquiring: {}...", ssotoken[:8])
             try:
                 result = await acquire_cli_token(ssotoken)
             except Exception as exc:
-                logger.warning("cli lazy acquire failed: %s... error=%s", ssotoken[:8], exc)
+                logger.warning("cli lazy acquire failed: {}... error={}", ssotoken[:8], exc)
                 return None
             expires_at = now_ms() + result["expires_in"] * 1000
             try:
@@ -106,7 +106,7 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
                     },
                 )])
             except Exception as exc:
-                logger.warning("cli lazy persist: %s... error=%s", ssotoken[:8], exc)
+                logger.warning("cli lazy persist: {}... error={}", ssotoken[:8], exc)
             access_token = result["access_token"]
             _cli_token_cache[ssotoken] = access_token
             return access_token
@@ -116,13 +116,13 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
             # Token expired — try refresh
             refresh_tok = rec.ext.get("cli_refresh_token")
             if not refresh_tok:
-                logger.warning("cli token expired and no refresh_token: %s...", ssotoken[:8])
+                logger.warning("cli token expired and no refresh_token: {}...", ssotoken[:8])
                 return None
-            logger.info("cli token expired, refreshing: %s...", ssotoken[:8])
+            logger.info("cli token expired, refreshing: {}...", ssotoken[:8])
             try:
                 result = await refresh_cli_token(refresh_tok)
             except Exception as exc:
-                logger.warning("cli token refresh failed: %s... error=%s", ssotoken[:8], exc)
+                logger.warning("cli token refresh failed: {}... error={}", ssotoken[:8], exc)
                 return None
             if result is None:
                 return None
@@ -137,7 +137,7 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
                     },
                 )])
             except Exception as exc:
-                logger.warning("cli token persist after refresh: %s... error=%s", ssotoken[:8], exc)
+                logger.warning("cli token persist after refresh: {}... error={}", ssotoken[:8], exc)
             access_token = result["access_token"]
 
         return access_token
@@ -162,7 +162,7 @@ async def completions(
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
 
-    logger.info("cli chat: model=%s stream=%s msgs=%s", model, stream, len(messages))
+    logger.info("cli chat: model={} stream={} msgs={}", model, stream, len(messages))
 
     from app.dataplane.account import _directory as _acct_dir
     if _acct_dir is None:
@@ -184,7 +184,7 @@ async def completions(
                 ssotoken = acct.token
                 access_token = await _get_cli_access_token(ssotoken)
                 if not access_token:
-                    logger.warning("cli no token: %s...", ssotoken[:8])
+                    logger.warning("cli no token: {}...", ssotoken[:8])
                     excluded.append(ssotoken)
                     await directory.release(acct)
                     continue
@@ -201,7 +201,7 @@ async def completions(
                     )
                     try:
                         _gen = stream_cli_chat(access_token, payload, timeout_s=timeout_s)
-                        logger.info("cli stream_chat generator: type=%s", type(_gen))
+                        logger.info("cli stream_chat generator: type={}", type(_gen))
                         async for line in _gen:
                             line = line.strip()
                             if not line or not line.startswith("data:"):
@@ -238,13 +238,13 @@ async def completions(
                         yield f"data: {orjson.dumps(final).decode()}\n\n"
                         yield "data: [DONE]\n\n"
                         success = True
-                        logger.info("cli stream ok: %s/%s %s", attempt + 1, max_retries + 1, model)
+                        logger.info("cli stream ok: {}/{} {}", attempt + 1, max_retries + 1, model)
                         return
 
                     except UpstreamError as exc:
                         fail_exc = exc
                         if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
-                            logger.warning("cli retry: %s/%s status=%s", attempt + 1, max_retries, exc.status)
+                            logger.warning("cli retry: {}/{} status={}", attempt + 1, max_retries, exc.status)
                             excluded.append(ssotoken)
                         else:
                             raise
@@ -323,7 +323,7 @@ async def completions(
                 )
                 resp = make_chat_response(response_id, model, full_text, usage)
                 success = True
-                logger.info("cli non-stream ok: %s", model)
+                logger.info("cli non-stream ok: {}", model)
                 return resp
 
             except UpstreamError as exc:

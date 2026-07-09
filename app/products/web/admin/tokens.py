@@ -597,12 +597,12 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
                 if exc.status == 429 and attempt < 4:
                     delay = _backoff_delay(attempt)
                     logger.warning(
-                        "import oauth 429: token=%s attempt=%s delay=%.1fs",
+                        "import oauth 429: token={} attempt={} delay=%.1fs",
                         _mask(token), attempt, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
-                logger.warning("admin import oauth failed: token=%s error=%s", _mask(token), exc)
+                logger.warning("admin import oauth failed: token={} error={}", _mask(token), exc)
                 return
         if not success:
             return
@@ -622,24 +622,24 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
                 "cli_sub": result.get("sub", ""),
             },
         ))
-        logger.info("admin import oauth acquired: token=%s email=%s expires_at=%s", _mask(token), result.get("email", ""), expires_at)
+        logger.info("admin import oauth acquired: token={} email={} expires_at={}", _mask(token), result.get("email", ""), expires_at)
 
         # Commit every 10 tokens so recently-imported accounts can serve requests
         if len(pending) >= 10:
             try:
                 await repo.patch_accounts(pending)
-                logger.info("admin import oauth batch persisted: count=%s", len(pending))
+                logger.info("admin import oauth batch persisted: count={}", len(pending))
             except Exception as exc:
-                logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(pending), exc)
+                logger.warning("admin import oauth batch persist failed: count={} error={}", len(pending), exc)
             pending.clear()
 
     # Flush remainder
     if pending:
         try:
             await repo.patch_accounts(pending)
-            logger.info("admin import oauth batch persisted: count=%s", len(pending))
+            logger.info("admin import oauth batch persisted: count={}", len(pending))
         except Exception as exc:
-            logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(pending), exc)
+            logger.warning("admin import oauth batch persist failed: count={} error={}", len(pending), exc)
 
 
 async def _acquire_cli_oauth(sso_token: str) -> dict:
@@ -675,15 +675,15 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
             except UpstreamError as exc:
                 if exc.status == 429 and attempt < 4:
                     delay = _backoff_delay(attempt)
-                    logger.warning("import nsfw 429: token=%s attempt=%s delay=%.1fs", _mask(token), attempt, delay)
+                    logger.warning("import nsfw 429: token={} attempt={} delay=%.1fs", _mask(token), attempt, delay)
                     await asyncio.sleep(delay)
                     continue
                 fail_c += 1
-                logger.warning("admin import auto nsfw failed: token=%s error=%s", _mask(token), exc)
+                logger.warning("admin import auto nsfw failed: token={} error={}", _mask(token), exc)
                 return
             except Exception as exc:
                 fail_c += 1
-                logger.warning("admin import auto nsfw failed: token=%s error=%s", _mask(token), exc)
+                logger.warning("admin import auto nsfw failed: token={} error={}", _mask(token), exc)
                 return
 
     await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
@@ -694,7 +694,7 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
         try:
             await repo.patch_accounts(tag_patches)
         except Exception as exc:
-            logger.warning("admin import nsfw tag batch failed: count=%s error=%s", len(added_tags), exc)
+            logger.warning("admin import nsfw tag batch failed: count={} error={}", len(added_tags), exc)
 
     await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
     logger.info(

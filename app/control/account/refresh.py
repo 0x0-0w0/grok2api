@@ -693,7 +693,7 @@ class AccountRefreshService:
         try:
             page = await self._repo.list_accounts(ListAccountsQuery(page=1, page_size=2000))
         except Exception as exc:
-            logger.warning("cli token refresh list failed: %s", exc)
+            logger.warning("cli token refresh list failed: {}", exc)
             return 0
 
         for record in page.items:
@@ -709,7 +709,7 @@ class AccountRefreshService:
             try:
                 result = await refresh_cli_token(refresh_tok)
             except Exception as exc:
-                logger.warning("cli token refresh failed: token=%s... error=%s", record.token[:8], exc)
+                logger.warning("cli token refresh failed: token={}... error={}", record.token[:8], exc)
                 continue
 
             if result is None:
@@ -726,12 +726,12 @@ class AccountRefreshService:
                     },
                 )])
                 refreshed += 1
-                logger.info("cli token refreshed: token=%s... new_expires_at=%s", record.token[:8], new_expires_at)
+                logger.info("cli token refreshed: token={}... new_expires_at={}", record.token[:8], new_expires_at)
             except Exception as exc:
-                logger.warning("cli token persist failed: token=%s... error=%s", record.token[:8], exc)
+                logger.warning("cli token persist failed: token={}... error={}", record.token[:8], exc)
 
         if refreshed > 0:
-            logger.info("cli token refresh completed: refreshed=%s", refreshed)
+            logger.info("cli token refresh completed: refreshed={}", refreshed)
         return refreshed
 
     async def fill_missing_cli_tokens(self) -> int:
@@ -753,7 +753,7 @@ class AccountRefreshService:
         try:
             page = await self._repo.list_accounts(ListAccountsQuery(page=1, page_size=2000))
         except Exception as exc:
-            logger.warning("cli fill missing list failed: %s", exc)
+            logger.warning("cli fill missing list failed: {}", exc)
             return 0
 
         for record in page.items:
@@ -769,7 +769,7 @@ class AccountRefreshService:
             try:
                 result = await acquire_cli_token(record.token)
             except Exception as exc:
-                logger.warning("cli fill acquire failed: token=%s... error=%s", record.token[:8], exc)
+                logger.warning("cli fill acquire failed: token={}... error={}", record.token[:8], exc)
                 continue
             await asyncio.sleep(6.0)
 
@@ -786,11 +786,11 @@ class AccountRefreshService:
                     },
                 )])
                 filled += 1
-                logger.info("cli token filled: token=%s... email=%s", record.token[:8], result.get("email", ""))
+                logger.info("cli token filled: token={}... email={}", record.token[:8], result.get("email", ""))
             except Exception as exc:
-                logger.warning("cli fill persist failed: token=%s... error=%s", record.token[:8], exc)
+                logger.warning("cli fill persist failed: token={}... error={}", record.token[:8], exc)
 
-        logger.info("cli fill missing completed: filled=%s skipped=%s", filled, skipped)
+        logger.info("cli fill missing completed: filled={} skipped={}", filled, skipped)
         return filled
 
 

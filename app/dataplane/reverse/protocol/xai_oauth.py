@@ -230,7 +230,7 @@ async def refresh_cli_token(refresh_token: str) -> dict | None:
 
     from curl_cffi.requests import AsyncSession
 
-    logger.debug("xai oauth refresh: refresh_token=%s...", refresh_token[:8])
+    logger.debug("xai oauth refresh: refresh_token={}...", refresh_token[:8])
 
     async with AsyncSession(impersonate=BROWSER) as session:
         try:
@@ -253,12 +253,12 @@ async def refresh_cli_token(refresh_token: str) -> dict | None:
                 timeout=15.0,
             )
             if r.status_code != 200:
-                logger.warning("xai oauth refresh failed: status=%s body=%s", r.status_code, r.text[:200])
+                logger.warning("xai oauth refresh failed: status={} body={}", r.status_code, r.text[:200])
                 return None
 
             data = r.json()
         except Exception as exc:
-            logger.warning("xai oauth refresh transport error: %s", exc)
+            logger.warning("xai oauth refresh transport error: {}", exc)
             return None
 
     email = sub = ""
