@@ -8,7 +8,7 @@ from typing import Any
 
 from app.control.model.spec import ModelSpec
 from app.dataplane.reverse.runtime.endpoint_table import (
-    CHAT, MEDIA_POST, WS_IMAGINE,
+    CHAT, CLI_CHAT_COMPLETIONS, MEDIA_POST, WS_IMAGINE,
 )
 from .types import ReversePlan, TransportKind
 
@@ -60,6 +60,9 @@ def _resolve_endpoint(
 
     if spec.is_chat():
         return CHAT, TransportKind.HTTP_SSE
+
+    if spec.is_cli_chat():
+        return CLI_CHAT_COMPLETIONS, TransportKind.HTTP_SSE
 
     if spec.is_image():
         return WS_IMAGINE, TransportKind.WEBSOCKET

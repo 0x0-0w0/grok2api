@@ -35,6 +35,7 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
     heavy_w = qs.heavy
     grok_4_3_w = qs.grok_4_3
     console_w = qs.console
+    cli_w = qs.cli
     # fmt: off
     return dict(
         pool_id         = pool_id,
@@ -45,24 +46,28 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
         quota_heavy     = max(0, heavy_w.remaining)     if heavy_w    is not None else -1,
         quota_grok_4_3  = max(0, grok_4_3_w.remaining) if grok_4_3_w is not None else -1,
         quota_console   = max(0, console_w.remaining)   if console_w  is not None else -1,
+        quota_cli       = max(0, cli_w.remaining)       if cli_w       is not None else -1,
         total_auto      = _total(qs.auto),
         total_fast      = _total(qs.fast),
         total_expert    = _total(qs.expert),
         total_heavy     = _total(heavy_w),
         total_grok_4_3  = _total(grok_4_3_w),
         total_console   = _total(console_w),
+        total_cli       = _total(cli_w),
         window_auto     = _window_s(qs.auto),
         window_fast     = _window_s(qs.fast),
         window_expert   = _window_s(qs.expert),
         window_heavy    = _window_s(heavy_w),
         window_grok_4_3 = _window_s(grok_4_3_w),
         window_console  = _window_s(console_w),
+        window_cli      = _window_s(cli_w),
         reset_auto      = _reset_s(qs.auto),
         reset_fast      = _reset_s(qs.fast),
         reset_expert    = _reset_s(qs.expert),
         reset_heavy     = _reset_s(heavy_w)    if heavy_w    is not None else 0,
         reset_grok_4_3  = _reset_s(grok_4_3_w) if grok_4_3_w is not None else 0,
         reset_console   = _reset_s(console_w)  if console_w  is not None else 0,
+        reset_cli       = _reset_s(cli_w)      if cli_w       is not None else 0,
         health          = 1.0,
         last_use_s      = ms_to_s(record.last_use_at)  if record.last_use_at  else 0,
         last_fail_s     = ms_to_s(record.last_fail_at) if record.last_fail_at else 0,

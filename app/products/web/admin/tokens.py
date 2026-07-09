@@ -111,7 +111,7 @@ class SaveTokensRequest(RootModel[dict[str, list[str | TokenImportItem]]]):
 def _quota_brief(q: dict) -> dict:
     """Extract {auto, fast, expert, heavy, console} with only remaining/total from stored quota dict."""
     out = {}
-    for mode in ("auto", "fast", "expert", "heavy", "console"):
+    for mode in ("auto", "fast", "expert", "heavy", "console", "cli"):
         v = q.get(mode)
         if isinstance(v, dict):
             out[mode] = {
@@ -538,8 +538,37 @@ async def _refresh_then_auto_nsfw(
     auto_nsfw_enabled: bool,
 ) -> None:
     unique_tokens = list(dict.fromkeys(tokens))
+    _fire_and_forget(_acquire_oauth_and_persist(repo, unique_tokens))
     if await _refresh_imported(svc, unique_tokens):
         _schedule_auto_nsfw(repo, unique_tokens, enabled=auto_nsfw_enabled)
+
+
+async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str]) -> None:
+    """Acquire Grok CLI OAuth tokens for each SSO token and persist via ext_merge."""
+    for token in tokens:
+        try:
+            result = await _acquire_cli_oauth(token)
+            expires_at = now_ms() + result["expires_in"] * 1000
+            await repo.patch_accounts([AccountPatch(
+                token=token,
+                ext_merge={
+                    "cli_access_token": result["access_token"],
+                    "cli_refresh_token": result["refresh_token"],
+                    "cli_expires_at": expires_at,
+                    "cli_token_type": result["token_type"],
+                    "cli_email": result.get("email", ""),
+                    "cli_sub": result.get("sub", ""),
+                },
+            )])
+            logger.info("admin import oauth acquired: token={} email={} expires_at={}", _mask(token), result.get("email", ""), expires_at)
+        except Exception as exc:
+            logger.warning("admin import oauth failed: token={} error={}", _mask(token), exc)
+
+
+async def _acquire_cli_oauth(sso_token: str) -> dict:
+    from app.dataplane.reverse.protocol.xai_oauth import acquire_cli_token
+
+    return await acquire_cli_token(sso_token)
 
 
 async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) -> None:

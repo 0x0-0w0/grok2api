@@ -14,6 +14,7 @@ class ModeId(IntEnum):
     HEAVY = 3
     GROK_4_3 = 4
     CONSOLE = 5  # console.x.ai 独立配额
+    CLI = 6  # api.x.ai OAuth CLI 配额
 
 
 class PoolId(IntEnum):
@@ -53,6 +54,7 @@ ALL_MODE_IDS: tuple[int, ...] = (
     int(ModeId.HEAVY),
     int(ModeId.GROK_4_3),
     int(ModeId.CONSOLE),
+    int(ModeId.CLI),
 )
 
 __all__ = [

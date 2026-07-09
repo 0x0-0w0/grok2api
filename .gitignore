@@ -54,5 +54,8 @@ htmlcov/
 # Project specific
 .ace-tool/
 
+# Research artifacts (credentials, binaries, dumps, etc.)
+research/
+
 # Local analysis docs (not for public repo)
 docs/

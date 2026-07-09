@@ -52,6 +52,7 @@ _MODE_KEYS = {
     3: "quota_heavy",
     4: "quota_grok_4_3",
     5: "quota_console",  # console.x.ai 独立配额
+    6: "quota_cli",  # api.x.ai OAuth CLI 配额
 }
 
 
@@ -182,8 +183,9 @@ class AccountRefreshService:
             return
 
         # mode_id=5 (CONSOLE) 是本地管理的配额，不需要请求 xai usage API
+        # mode_id=6 (CLI) 是本地管理的配额，不需要请求 xai usage API
         # 直接做本地扣减并更新 usage_use_count
-        if mode_id == 5:
+        if mode_id == 5 or mode_id == 6:
             await self._apply_single_mode(
                 record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
             )
@@ -670,6 +672,67 @@ class AccountRefreshService:
         if count > 0:
             logger.info("console expired accounts auto-recovered: count={}", count)
         return count
+
+    async def refresh_cli_tokens(self) -> int:
+        """Refresh expired CLI OAuth tokens across all accounts.
+
+        Scans all accounts for expired ``cli_expires_at`` timestamps,
+        uses the stored ``cli_refresh_token`` to obtain new tokens,
+        and persists the updated credentials via ext_merge.
+
+        Returns:
+            Number of tokens successfully refreshed.
+        """
+        from app.platform.runtime.clock import now_ms
+        from app.dataplane.reverse.protocol.xai_oauth import refresh_cli_token
+        from .commands import AccountPatch
+
+        now = now_ms()
+        refreshed = 0
+
+        try:
+            page = await self._repo.list_accounts(ListAccountsQuery(page=1, page_size=2000))
+        except Exception as exc:
+            logger.warning("cli token refresh list failed: %s", exc)
+            return 0
+
+        for record in page.items:
+            if record.is_deleted():
+                continue
+            expires_at = record.ext.get("cli_expires_at")
+            if not expires_at or expires_at > now:
+                continue
+            refresh_tok = record.ext.get("cli_refresh_token")
+            if not refresh_tok:
+                continue
+
+            try:
+                result = await refresh_cli_token(refresh_tok)
+            except Exception as exc:
+                logger.warning("cli token refresh failed: token=%s... error=%s", record.token[:8], exc)
+                continue
+
+            if result is None:
+                continue
+
+            new_expires_at = now + result["expires_in"] * 1000
+            try:
+                await self._repo.patch_accounts([AccountPatch(
+                    token=record.token,
+                    ext_merge={
+                        "cli_access_token": result["access_token"],
+                        "cli_refresh_token": result.get("refresh_token", refresh_tok),
+                        "cli_expires_at": new_expires_at,
+                    },
+                )])
+                refreshed += 1
+                logger.info("cli token refreshed: token=%s... new_expires_at=%s", record.token[:8], new_expires_at)
+            except Exception as exc:
+                logger.warning("cli token persist failed: token=%s... error=%s", record.token[:8], exc)
+
+        if refreshed > 0:
+            logger.info("cli token refresh completed: refreshed=%s", refreshed)
+        return refreshed
 
 
 __all__ = ["AccountRefreshService", "RefreshResult"]

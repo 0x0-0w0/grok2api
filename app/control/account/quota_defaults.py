@@ -46,11 +46,15 @@ BASIC_FAST_WINDOW_SECONDS = 86_400
 BASIC_CONSOLE_LIMIT = 20
 BASIC_CONSOLE_WINDOW_SECONDS = 3600
 
+BASIC_CLI_LIMIT = 10
+BASIC_CLI_WINDOW_SECONDS = 86_400
+
 BASIC_QUOTA_DEFAULTS = AccountQuotaSet(
     auto=_w(0, 0, 0),  # unsupported on basic accounts
     fast=_w(BASIC_FAST_LIMIT, BASIC_FAST_LIMIT, BASIC_FAST_WINDOW_SECONDS),
     expert=_w(0, 0, 0),  # unsupported on basic accounts
     console=_w(BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS),
+    cli=_w(BASIC_CLI_LIMIT, BASIC_CLI_LIMIT, BASIC_CLI_WINDOW_SECONDS),
 )
 
 SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -109,6 +113,10 @@ def default_quota_set(pool: str) -> AccountQuotaSet:
     if src.console is not None:
         qs.console = _w(
             src.console.remaining, src.console.total, src.console.window_seconds
+        )
+    if src.cli is not None:
+        qs.cli = _w(
+            src.cli.remaining, src.cli.total, src.cli.window_seconds
         )
     return qs
 
@@ -176,6 +184,7 @@ def normalize_quota_set(pool: str, quota_set: AccountQuotaSet) -> AccountQuotaSe
     qs.heavy = normalize_quota_window(pool, 3, quota_set.heavy)
     qs.grok_4_3 = normalize_quota_window(pool, 4, quota_set.grok_4_3)
     qs.console = normalize_quota_window(pool, 5, quota_set.console) or defaults.console
+    qs.cli = normalize_quota_window(pool, 6, quota_set.cli) or defaults.cli
     return qs
 
 

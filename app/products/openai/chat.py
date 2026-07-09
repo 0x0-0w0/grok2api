@@ -490,6 +490,19 @@ async def completions(
         )
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── CLI API 路由 (api.x.ai/v1/responses) ────────────────────────────────
+    if spec.is_cli_chat():
+        from .cli_chat import completions as cli_completions
+        return await cli_completions(
+            model=model,
+            messages=messages,
+            stream=is_stream,
+            emit_think=emit_think,
+            temperature=temperature,
+            top_p=top_p,
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
     message, files = _extract_message(messages)
     if not message.strip():
         raise UpstreamError("Empty message after extraction", status=400)

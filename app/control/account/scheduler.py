@@ -55,6 +55,10 @@ class AccountRefreshScheduler:
             asyncio.create_task(self._loop(pool), name=f"account-refresh-{pool}")
             for pool in _POOL_CONFIG
         ]
+        # CLI token refresh loop — every 5 minutes
+        self._tasks.append(
+            asyncio.create_task(self._cli_refresh_loop(), name="cli-token-refresh")
+        )
         intervals = {p: _interval(p) for p in _POOL_CONFIG}
         logger.info(
             "account refresh scheduler started: basic_interval_s={} super_interval_s={} heavy_interval_s={}",
@@ -98,6 +102,28 @@ class AccountRefreshScheduler:
                     type(exc).__name__,
                     exc,
                 )
+
+    async def _cli_refresh_loop(self) -> None:
+        """Periodically refresh expired CLI OAuth tokens."""
+        CLI_INTERVAL = 300  # 5 minutes
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=float(CLI_INTERVAL))
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            if self._stop.is_set():
+                break
+
+            try:
+                count = await self._service.refresh_cli_tokens()
+                if count > 0:
+                    logger.info("cli token refresh cycle completed: refreshed={}", count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("cli token refresh cycle failed: error={}", exc)
 
 
 # ---------------------------------------------------------------------------

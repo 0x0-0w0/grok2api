@@ -48,9 +48,15 @@ LIVEKIT_TOKENS    = f"{BASE}/rest/livekit/tokens"              # POST
 CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"             # POST (OpenAI Responses API)
 CONSOLE_CHAT      = f"{CONSOLE_BASE}/v1/chat/completions"      # POST (OpenAI Chat API)
 
+# ── CLI proxy (cli-chat-proxy.grok.com) ────────────────────────────────
+# Grok CLI OAuth access_token + X-XAI-Token-Auth: xai-grok-cli
+# Standard OpenAI Chat Completions API
+CLI_PROXY_BASE     = "https://cli-chat-proxy.grok.com"
+CLI_CHAT_COMPLETIONS = f"{CLI_PROXY_BASE}/v1/chat/completions"
+
 
 __all__ = [
-    "BASE", "ASSETS_CDN", "CONSOLE_BASE",
+    "BASE", "ASSETS_CDN", "CONSOLE_BASE", "CLI_BASE",
     "CHAT",
     "ASSETS_UPLOAD", "ASSETS_LIST", "ASSETS_DELETE", "ASSETS_DOWNLOAD",
     "RATE_LIMITS",
@@ -58,4 +64,5 @@ __all__ = [
     "MEDIA_POST", "MEDIA_POST_LINK", "VIDEO_UPSCALE",
     "WS_IMAGINE", "WS_LIVEKIT", "LIVEKIT_TOKENS",
     "CONSOLE_RESPONSES", "CONSOLE_CHAT",
+    "CLI_PROXY_BASE", "CLI_CHAT_COMPLETIONS",
 ]

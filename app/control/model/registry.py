@@ -71,6 +71,11 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-multi-agent-xhigh",            ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent XHigh"),
     ModelSpec("grok-4.20-0309-non-reasoning-console",   ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 Non-Reasoning (Console)"),
     ModelSpec("grok-build-console",                     ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok Build 0.1 (Console)"),
+
+    # === CLI Chat (api.x.ai/v1/responses) ==================================
+    # 通过 api.x.ai 路由，使用 OAuth access_token (Bearer)
+    # 限时免费，Basic 池即可使用，每号默认 5 次额度
+    ModelSpec("grok-4.5-cli",                           ModeId.CLI,      Tier.BASIC, Capability.CLI_CHAT,     True, "Grok 4.5 (CLI)"),
 )
 # fmt: on
 
