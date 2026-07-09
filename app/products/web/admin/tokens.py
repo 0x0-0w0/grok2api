@@ -584,6 +584,7 @@ async def _refresh_then_auto_nsfw(
 
 async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str]) -> None:
     """Acquire Grok CLI OAuth tokens for each SSO token and persist via ext_merge."""
+    patches: list[AccountPatch] = []
     for token in tokens:
         await _import_limiter.acquire()
         success = False
@@ -607,21 +608,25 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
             return
 
         expires_at = now_ms() + result["expires_in"] * 1000
+        patches.append(AccountPatch(
+            token=token,
+            ext_merge={
+                "cli_access_token": result["access_token"],
+                "cli_refresh_token": result["refresh_token"],
+                "cli_expires_at": expires_at,
+                "cli_token_type": result["token_type"],
+                "cli_email": result.get("email", ""),
+                "cli_sub": result.get("sub", ""),
+            },
+        ))
+        logger.info("admin import oauth acquired: token=%s email=%s expires_at=%s", _mask(token), result.get("email", ""), expires_at)
+
+    if patches:
         try:
-            await repo.patch_accounts([AccountPatch(
-                token=token,
-                ext_merge={
-                    "cli_access_token": result["access_token"],
-                    "cli_refresh_token": result["refresh_token"],
-                    "cli_expires_at": expires_at,
-                    "cli_token_type": result["token_type"],
-                    "cli_email": result.get("email", ""),
-                    "cli_sub": result.get("sub", ""),
-                },
-            )])
-            logger.info("admin import oauth acquired: token=%s email=%s expires_at=%s", _mask(token), result.get("email", ""), expires_at)
+            await repo.patch_accounts(patches)
+            logger.info("admin import oauth batch persisted: count=%s", len(patches))
         except Exception as exc:
-            logger.warning("admin import oauth persist failed: token=%s error=%s", _mask(token), exc)
+            logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(patches), exc)
 
 
 async def _acquire_cli_oauth(sso_token: str) -> dict:
@@ -643,14 +648,16 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
         return
 
     ok_c = fail_c = 0
+    added_tags: list[str] = []
 
     async def _one(token: str) -> None:
         nonlocal ok_c, fail_c
         await _import_limiter.acquire()
         for attempt in range(5):
             try:
-                await _nsfw_one(repo, token, True)
+                await _nsfw_one(repo, token, True, skip_patch=True)
                 ok_c += 1
+                added_tags.append(token)
                 return
             except UpstreamError as exc:
                 if exc.status == 429 and attempt < 4:
@@ -665,6 +672,16 @@ async def _enable_nsfw_imported(repo: "AccountRepository", tokens: list[str]) ->
                 fail_c += 1
                 logger.warning("admin import auto nsfw failed: token=%s error=%s", _mask(token), exc)
                 return
+
+    await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
+
+    # Batch tag commit — avoid one-per-token transactions
+    if added_tags:
+        tag_patches = [AccountPatch(token=t, add_tags=["nsfw"]) for t in added_tags]
+        try:
+            await repo.patch_accounts(tag_patches)
+        except Exception as exc:
+            logger.warning("admin import nsfw tag batch failed: count=%s error=%s", len(added_tags), exc)
 
     await run_batch(manageable_tokens, _one, concurrency=_concurrency(None, "batch.nsfw_concurrency"))
     logger.info(
