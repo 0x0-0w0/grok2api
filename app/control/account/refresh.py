@@ -165,7 +165,7 @@ class AccountRefreshService:
         if not active:
             return RefreshResult(checked=len(records))
 
-        concurrency = get_config("account.refresh.usage_concurrency", 15)
+        concurrency = get_config("account.refresh.usage_concurrency", 3)
         results = await run_batch(
             active,
             lambda r: self._refresh_one(r, apply_fallback=True, bootstrap=True),
@@ -213,7 +213,7 @@ class AccountRefreshService:
         if pool is not None:
             records = [r for r in records if r.pool == pool]
 
-        concurrency = get_config("account.refresh.usage_concurrency", 15)
+        concurrency = get_config("account.refresh.usage_concurrency", 3)
         results = await run_batch(
             records,
             lambda r: self._refresh_one(r, apply_fallback=True),
@@ -247,7 +247,7 @@ class AccountRefreshService:
     async def refresh_tokens(self, tokens: list[str]) -> RefreshResult:
         """Explicit refresh for a list of tokens (admin / manual trigger)."""
         records = [r for r in await self._repo.get_accounts(tokens) if is_manageable(r)]
-        concurrency = get_config("account.refresh.usage_concurrency", 15)
+        concurrency = get_config("account.refresh.usage_concurrency", 3)
         results = await run_batch(
             records,
             lambda r: self._refresh_one(r, bootstrap=True),
@@ -765,11 +765,13 @@ class AccountRefreshService:
             if record.status != AccountStatus.ACTIVE:
                 continue
 
+            # Rate-limit: max 10 OAuth calls per minute
             try:
                 result = await acquire_cli_token(record.token)
             except Exception as exc:
                 logger.warning("cli fill acquire failed: token=%s... error=%s", record.token[:8], exc)
                 continue
+            await asyncio.sleep(6.0)
 
             expires_at = now_ms() + result["expires_in"] * 1000
             try:
