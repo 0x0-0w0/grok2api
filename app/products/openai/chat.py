@@ -501,7 +501,8 @@ async def completions(
             temperature=temperature,
             top_p=top_p,
         )
-        logger.info("cli dispatch result type=%s", type(result).__name__ if result is not None else None)
+        if result is None:
+            raise RateLimitError("No CLI accounts available — import an SSO token first")
         return result
     # ─────────────────────────────────────────────────────────────────────────
 
