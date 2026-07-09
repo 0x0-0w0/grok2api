@@ -685,7 +685,7 @@ class AccountRefreshService:
         """
         from app.platform.runtime.clock import now_ms
         from app.dataplane.reverse.protocol.xai_oauth import refresh_cli_token
-        from .commands import AccountPatch
+        from .commands import AccountPatch, ListAccountsQuery
 
         now = now_ms()
         refreshed = 0
