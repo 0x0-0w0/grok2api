@@ -584,7 +584,7 @@ async def _refresh_then_auto_nsfw(
 
 async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str]) -> None:
     """Acquire Grok CLI OAuth tokens for each SSO token and persist via ext_merge."""
-    patches: list[AccountPatch] = []
+    pending: list[AccountPatch] = []
     for token in tokens:
         await _import_limiter.acquire()
         success = False
@@ -608,7 +608,10 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
             return
 
         expires_at = now_ms() + result["expires_in"] * 1000
-        patches.append(AccountPatch(
+        # Write to in-memory cache immediately so requests can use it
+        from app.products.openai.cli_chat import _cli_token_cache
+        _cli_token_cache[token] = result["access_token"]
+        pending.append(AccountPatch(
             token=token,
             ext_merge={
                 "cli_access_token": result["access_token"],
@@ -621,12 +624,22 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
         ))
         logger.info("admin import oauth acquired: token=%s email=%s expires_at=%s", _mask(token), result.get("email", ""), expires_at)
 
-    if patches:
+        # Commit every 10 tokens so recently-imported accounts can serve requests
+        if len(pending) >= 10:
+            try:
+                await repo.patch_accounts(pending)
+                logger.info("admin import oauth batch persisted: count=%s", len(pending))
+            except Exception as exc:
+                logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(pending), exc)
+            pending.clear()
+
+    # Flush remainder
+    if pending:
         try:
-            await repo.patch_accounts(patches)
-            logger.info("admin import oauth batch persisted: count=%s", len(patches))
+            await repo.patch_accounts(pending)
+            logger.info("admin import oauth batch persisted: count=%s", len(pending))
         except Exception as exc:
-            logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(patches), exc)
+            logger.warning("admin import oauth batch persist failed: count=%s error=%s", len(pending), exc)
 
 
 async def _acquire_cli_oauth(sso_token: str) -> dict:
