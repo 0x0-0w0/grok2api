@@ -257,81 +257,76 @@ async def completions(
 
         return _run_stream()
 
-    # Non-streaming
-    excluded: list[str] = []
-    for attempt in range(max_retries + 1):
-        acct, selected_mode_id = await reserve_account(
-            directory, spec,
-            now_s_override=now_s(),
-            exclude_tokens=excluded or None,
-        )
-        if acct is None:
-            raise RateLimitError("No available accounts")
-
-        ssotoken = acct.token
-        access_token = await _get_cli_access_token(ssotoken)
-        if not access_token:
-            excluded.append(ssotoken)
-            await directory.release(acct)
-            continue
-
-        success = False
-        fail_exc: BaseException | None = None
-        full_text: list[str] = []
-        usage_data: dict = {}
-
-        try:
-            payload = build_cli_payload(
-                messages=messages, model="grok-4.5",
-                temperature=temperature, top_p=top_p, stream=False,
+        # Non-streaming
+        excluded: list[str] = []
+        for attempt in range(max_retries + 1):
+            acct, selected_mode_id = await reserve_account(
+                directory, spec,
+                now_s_override=now_s(),
+                exclude_tokens=excluded or None,
             )
-            async for line in stream_cli_chat(access_token, payload, timeout_s=timeout_s):
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    continue
-                try:
-                    obj = orjson.loads(data)
-                except Exception:
-                    continue
-                choices = obj.get("choices", [])
-                if choices:
-                    msg = choices[0].get("message", {})
-                    content = msg.get("content", "")
-                    if content:
-                        full_text.append(content)
-                usg = obj.get("usage")
-                if usg:
-                    usage_data = usg
+            if acct is None:
+                raise RateLimitError("No available accounts")
 
-            usage = build_usage(
-                usage_data.get("prompt_tokens", 0) or estimate_prompt_tokens(messages),
-                usage_data.get("completion_tokens", 0) or estimate_tokens("".join(full_text)),
-            )
-            resp = make_chat_response(response_id, model, "".join(full_text), usage)
-            success = True
-            logger.info("cli non-stream ok: %s %s tokens", model, usage_data.get("total_tokens", "?"))
-            return resp
-
-        except UpstreamError as exc:
-            fail_exc = exc
-            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+            ssotoken = acct.token
+            access_token = await _get_cli_access_token(ssotoken)
+            if not access_token:
                 excluded.append(ssotoken)
                 await directory.release(acct)
-                await directory.feedback(ssotoken, FeedbackKind.SUCCESS, selected_mode_id, now_s_val=now_s())
                 continue
-            raise
-        finally:
-            if not success or fail_exc:
-                await directory.release(acct)
-                kind = feedback_kind_for_error(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-                await directory.feedback(ssotoken, kind, selected_mode_id, now_s_val=now_s())
-            else:
-                await directory.release(acct)
-                await directory.feedback(ssotoken, FeedbackKind.SUCCESS, selected_mode_id, now_s_val=now_s())
-                asyncio.create_task(_quota_sync(ssotoken, selected_mode_id)).add_done_callback(_log_task_exception)
+
+            success = False
+            fail_exc: BaseException | None = None
+            try:
+                payload = build_cli_payload(
+                    messages=messages, model="grok-4.5",
+                    temperature=temperature, top_p=top_p, stream=False,
+                )
+                from curl_cffi.requests import AsyncSession as _S
+                async with _S(impersonate="chrome136") as _s:
+                    r = await _s.post(
+                        "https://cli-chat-proxy.grok.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "X-XAI-Token-Auth": "xai-grok-cli",
+                            "Content-Type": "application/json",
+                            "x-grok-client-version": "0.2.93",
+                        },
+                        data=orjson.dumps(payload),
+                        timeout=timeout_s,
+                    )
+                    if r.status_code != 200:
+                        raise UpstreamError(f"CLI API returned {r.status_code}", status=r.status_code, body=r.text[:500])
+                    obj = r.json()
+
+                msg = obj.get("choices", [{}])[0].get("message", {})
+                full_text = msg.get("content", "")
+                usage_data = obj.get("usage", {})
+
+                usage = build_usage(
+                    usage_data.get("prompt_tokens", 0) or estimate_prompt_tokens(messages),
+                    usage_data.get("completion_tokens", 0) or estimate_tokens(full_text),
+                )
+                resp = make_chat_response(response_id, model, full_text, usage)
+                success = True
+                logger.info("cli non-stream ok: %s", model)
+                return resp
+
+            except UpstreamError as exc:
+                fail_exc = exc
+                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                    excluded.append(ssotoken)
+                    await directory.release(acct)
+                    await directory.feedback(ssotoken, FeedbackKind.SUCCESS, selected_mode_id, now_s_val=now_s())
+                    continue
+                raise
+            finally:
+                if not success:
+                    await directory.release(acct)
+                    kind = feedback_kind_for_error(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+                    await directory.feedback(ssotoken, kind, selected_mode_id, now_s_val=now_s())
+                else:
+                    asyncio.create_task(_quota_sync(ssotoken, selected_mode_id)).add_done_callback(_log_task_exception)
 
 
 __all__ = ["completions"]
