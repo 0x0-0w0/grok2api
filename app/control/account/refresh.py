@@ -685,6 +685,7 @@ class AccountRefreshService:
         """
         from app.platform.runtime.clock import now_ms
         from app.dataplane.reverse.protocol.xai_oauth import refresh_cli_token
+        from app.products.openai.cli_chat import _cli_token_cache
         from .commands import AccountPatch, ListAccountsQuery
 
         now = now_ms()
@@ -725,6 +726,7 @@ class AccountRefreshService:
                         "cli_expires_at": new_expires_at,
                     },
                 )])
+                _cli_token_cache[record.token] = result["access_token"]
                 refreshed += 1
                 logger.info("cli token refreshed: token={}... new_expires_at={}", record.token[:8], new_expires_at)
             except Exception as exc:
