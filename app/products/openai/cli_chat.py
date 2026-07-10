@@ -60,16 +60,21 @@ async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None)
         logger.warning("cli fail sync: {}... mode={} {}", token[:10], mode_id, e)
 
 
-# In-memory cache: ssotoken → access_token (populated before DB commit)
-_cli_token_cache: dict[str, str] = {}
+# In-memory cache: ssotoken → (access_token, expires_at_ms)
+_cli_token_cache: dict[str, tuple[str, int]] = {}
 
 
 async def _get_cli_access_token(ssotoken: str) -> str | None:
     """Look up cli_access_token, auto-refresh if expired, lazy-init if missing."""
+    from app.platform.runtime.clock import now_ms
+
     # Check in-memory cache first (hot path)
     cached = _cli_token_cache.get(ssotoken)
     if cached:
-        return cached
+        token, expires_at = cached
+        if expires_at > now_ms():
+            return token
+        # Expired in cache — fall through to DB/refresh
     try:
         from app.control.account.runtime import get_account_repo
         from app.platform.runtime.clock import now_ms
@@ -108,7 +113,8 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
             except Exception as exc:
                 logger.warning("cli lazy persist: {}... error={}", ssotoken[:8], exc)
             access_token = result["access_token"]
-            _cli_token_cache[ssotoken] = access_token
+            expires_at = now_ms() + result["expires_in"] * 1000
+            _cli_token_cache[ssotoken] = (access_token, expires_at)
             return access_token
 
         expires_at = rec.ext.get("cli_expires_at")

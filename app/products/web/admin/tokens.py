@@ -611,7 +611,7 @@ async def _acquire_oauth_and_persist(repo: "AccountRepository", tokens: list[str
         expires_at = now_ms() + result["expires_in"] * 1000
         # Write to in-memory cache immediately so requests can use it
         from app.products.openai.cli_chat import _cli_token_cache
-        _cli_token_cache[token] = result["access_token"]
+        _cli_token_cache[token] = (result["access_token"], expires_at)
         pending.append(AccountPatch(
             token=token,
             ext_merge={
