@@ -342,5 +342,7 @@ async def completions(
                 else:
                     asyncio.create_task(_quota_sync(ssotoken, selected_mode_id)).add_done_callback(_log_task_exception)
 
+        raise RateLimitError("No CLI accounts with a valid access token — import tokens and wait for OAuth")
+
 
 __all__ = ["completions"]
