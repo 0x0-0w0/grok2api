@@ -66,30 +66,52 @@ _cli_token_cache: dict[str, str] = {}
 
 async def _get_cli_access_token(ssotoken: str) -> str | None:
     """Look up cli_access_token, auto-refresh if expired, lazy-init if missing."""
+    logger.info("cli _get_cli_access_token called: {}...", ssotoken[:8])
     # Check in-memory cache first (hot path)
     cached = _cli_token_cache.get(ssotoken)
     if cached:
         return cached
     try:
-        from app.control.account.runtime import get_account_repo
         from app.platform.runtime.clock import now_ms
         from app.dataplane.reverse.protocol.xai_oauth import acquire_cli_token, refresh_cli_token
         from app.control.account.commands import AccountPatch
+        from app.dataplane.proxy import get_proxy_runtime
 
-        repo = get_account_repo()
+        # Resolve the account repository via the bootstrapped directory singleton.
+        # cli_chat runs in-process where main.py has already set _directory, so we
+        # access its repo directly — get_account_repo was never defined as a public
+        # accessor, and the previous import silently failed (caught below), which
+        # made every CLI request return "No CLI accounts available".
+        from app.dataplane.account import _directory as _acct_dir
+        if _acct_dir is None:
+            logger.debug("cli token: _acct_dir is None")
+            return None
+        repo = _acct_dir._repo
+
+        # Egress proxy for auth.x.ai OAuth (container may lack direct internet).
+        # Read directly from config to avoid flaresolverr clearance bundle.
+        proxy_url = ""
+        try:
+            proxy_url = get_config().get_str("proxy.egress.proxy_url", "")
+        except Exception as exc:
+            logger.debug("cli access token: proxy config read failed: {}", exc)
+
         if repo is None:
+            logger.debug("cli token: repo is None")
             return None
         records = await repo.get_accounts([ssotoken])
         if not records:
+            logger.debug("cli token: no records for {}...", ssotoken[:8])
             return None
         rec = records[0]
         access_token = rec.ext.get("cli_access_token")
+        logger.debug("cli token lookup: {}... has_token={} expires_at={}", ssotoken[:8], bool(access_token), rec.ext.get("cli_expires_at"))
 
         if not access_token:
             # --- Lazy init: no token yet, run full OAuth ---
             logger.info("cli token missing, lazy acquiring: {}...", ssotoken[:8])
             try:
-                result = await acquire_cli_token(ssotoken)
+                result = await acquire_cli_token(ssotoken, proxy_url=proxy_url)
             except Exception as exc:
                 logger.warning("cli lazy acquire failed: {}... error={}", ssotoken[:8], exc)
                 return None
@@ -120,7 +142,7 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
                 return None
             logger.info("cli token expired, refreshing: {}...", ssotoken[:8])
             try:
-                result = await refresh_cli_token(refresh_tok)
+                result = await refresh_cli_token(refresh_tok, proxy_url=proxy_url)
             except Exception as exc:
                 logger.warning("cli token refresh failed: {}... error={}", ssotoken[:8], exc)
                 return None
@@ -141,8 +163,8 @@ async def _get_cli_access_token(ssotoken: str) -> str | None:
             access_token = result["access_token"]
 
         return access_token
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("cli token lookup exception: {}... error={}", ssotoken[:8], exc)
     return None
 
 
@@ -168,6 +190,16 @@ async def completions(
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
+
+    # Resolve egress proxy once — cli-chat-proxy.grok.com must be reached via the
+    # proxy (container has no direct internet), same as the OAuth flow.
+    # CLI uses OAuth Bearer token, NOT Cloudflare clearance, so we skip
+    # the clearance bundle acquisition (which blocks on flaresolverr).
+    cli_proxy_url = ""
+    try:
+        cli_proxy_url = cfg.get_str("proxy.egress.proxy_url", "")
+    except Exception as exc:
+        logger.debug("cli chat: proxy config read failed: {}", exc)
 
     if stream:
         async def _run_stream() -> AsyncGenerator[str, None]:
@@ -200,7 +232,7 @@ async def completions(
                         temperature=temperature, top_p=top_p, stream=True,
                     )
                     try:
-                        _gen = stream_cli_chat(access_token, payload, timeout_s=timeout_s)
+                        _gen = stream_cli_chat(access_token, payload, timeout_s=timeout_s, proxy_url=cli_proxy_url)
                         logger.info("cli stream_chat generator: type={}", type(_gen))
                         async for line in _gen:
                             line = line.strip()
@@ -269,9 +301,11 @@ async def completions(
 
             raise RateLimitError("No CLI accounts with a valid access token — import tokens and wait for OAuth")
 
-        return _run_stream()
+        if stream:
+            return _run_stream()
 
         # Non-streaming
+        logger.warning("cli DEBUG: entering non-streaming path, max_retries={}", max_retries)
         excluded: list[str] = []
         for attempt in range(max_retries + 1):
             acct, selected_mode_id = await reserve_account(
@@ -283,6 +317,7 @@ async def completions(
                 raise RateLimitError("No available accounts")
 
             ssotoken = acct.token
+            logger.warning("cli DEBUG: calling _get_cli_access_token for {}...", ssotoken[:8])
             access_token = await _get_cli_access_token(ssotoken)
             if not access_token:
                 excluded.append(ssotoken)
@@ -297,7 +332,14 @@ async def completions(
                     temperature=temperature, top_p=top_p, stream=False,
                 )
                 from curl_cffi.requests import AsyncSession as _S
-                async with _S(impersonate="chrome136") as _s:
+                _session_kwargs: dict = {"impersonate": "chrome136"}
+                if cli_proxy_url:
+                    scheme = cli_proxy_url[:cli_proxy_url.find(":")].lower() if ":" in cli_proxy_url else ""
+                    if scheme.startswith("socks"):
+                        _session_kwargs["proxy"] = cli_proxy_url
+                    else:
+                        _session_kwargs["proxies"] = {"http": cli_proxy_url, "https": cli_proxy_url}
+                async with _S(**_session_kwargs) as _s:
                     r = await _s.post(
                         "https://cli-chat-proxy.grok.com/v1/chat/completions",
                         headers={
@@ -342,7 +384,8 @@ async def completions(
                 else:
                     asyncio.create_task(_quota_sync(ssotoken, selected_mode_id)).add_done_callback(_log_task_exception)
 
-        raise RateLimitError("No CLI accounts with a valid access token — import tokens and wait for OAuth")
+
+    raise RateLimitError("No CLI accounts with a valid access token — import tokens and wait for OAuth")
 
 
 __all__ = ["completions"]

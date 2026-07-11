@@ -80,9 +80,9 @@ _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
 }
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
-    "basic": frozenset((1, 5)),
-    "super": frozenset((0, 1, 2, 4, 5)),
-    "heavy": frozenset((0, 1, 2, 3, 4, 5)),
+    "basic": frozenset((1, 5, 6)),       # fast + console + cli
+    "super": frozenset((0, 1, 2, 4, 5, 6)),  # auto + fast + expert + grok_4_3 + console + cli
+    "heavy": frozenset((0, 1, 2, 3, 4, 5, 6)),  # all modes including cli
 }
 
 # ---------------------------------------------------------------------------
