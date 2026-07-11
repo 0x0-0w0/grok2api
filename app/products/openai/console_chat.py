@@ -32,6 +32,7 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
 )
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
+from .console_rate_limit import get_console_rate_limiter
 from ._format import (
     make_response_id,
     make_stream_chunk,
@@ -107,7 +108,9 @@ async def completions(
     spec = resolve_model(model)
     effort = _reasoning_effort_from_emit_think(emit_think)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
-    max_retries = selection_max_retries()
+    # console 429 是 team 级配额,换 token 无效。固定 1 次重试 + 3s 退避足够,
+    # 避免 random 策略下默认 5 次重试 × 3s = 15s 把单请求拖到 NewAPI 超时外。
+    max_retries = 1
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
 
@@ -121,188 +124,204 @@ async def completions(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
+    # 全局串行 + RPM 限流:console.x.ai 免费 team 共享 60 RPM + 严格并发窗口。
+    # Semaphore(burst) 串行化 + RPM token bucket 兜底,彻底避免并发互相烧配额。
+    # async with 语义:成功/异常都自动释放 semaphore。
+    _console_limiter = get_console_rate_limiter()
+
     # ── Streaming path ────────────────────────────────────────────────────────
     if stream:
         async def _run_stream() -> AsyncGenerator[str, None]:
-            excluded: list[str] = []
-            for attempt in range(max_retries + 1):
-                acct, selected_mode_id = await reserve_account(
-                    directory,
-                    spec,
-                    now_s_override=now_s(),
-                    exclude_tokens=excluded or None,
-                )
-                if acct is None:
-                    raise RateLimitError("No available accounts for this model tier")
-
-                token = acct.token
-                success = False
-                fail_exc: BaseException | None = None
-                _retry = False
-                adapter = ConsoleStreamAdapter()
-
-                try:
-                    payload = build_console_payload(
-                        messages=messages,
-                        model=model,
-                        temperature=temperature,
-                        top_p=top_p,
-                        reasoning_effort=effort,
-                        stream=True,
+            async with _console_limiter:
+                excluded: list[str] = []
+                for attempt in range(max_retries + 1):
+                    acct, selected_mode_id = await reserve_account(
+                        directory,
+                        spec,
+                        now_s_override=now_s(),
+                        exclude_tokens=excluded or None,
                     )
+                    if acct is None:
+                        raise RateLimitError("No available accounts for this model tier")
+
+                    token = acct.token
+                    success = False
+                    fail_exc: BaseException | None = None
+                    _retry = False
+                    adapter = ConsoleStreamAdapter()
 
                     try:
-                        yield ": heartbeat\n\n"
-                        async for event_type, data in stream_console_chat(
-                            token, payload, timeout_s=timeout_s
-                        ):
-                            tokens = adapter.feed(event_type, data)
-                            for tok in tokens:
-                                chunk = make_stream_chunk(response_id, model, tok)
-                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
-
-                        # 流结束，发送 final chunk
-                        usage_data = adapter.usage
-                        prompt_tokens = (
-                            usage_data.get("input_tokens", 0) if usage_data else
-                            estimate_prompt_tokens(messages)
-                        )
-                        completion_tokens = (
-                            usage_data.get("output_tokens", 0) if usage_data else
-                            estimate_tokens(adapter.full_text)
-                        )
-                        usage = build_usage(prompt_tokens, completion_tokens)
-                        final = make_stream_chunk(
-                            response_id, model, "", is_final=True
-                        )
-                        final["usage"] = usage
-                        yield f"data: {orjson.dumps(final).decode()}\n\n"
-                        yield "data: [DONE]\n\n"
-                        success = True
-                        logger.info(
-                            "console chat stream completed: attempt={}/{} model={} tokens={}",
-                            attempt + 1, max_retries + 1, model,
-                            (usage_data or {}).get("total_tokens", "?"),
+                        payload = build_console_payload(
+                            messages=messages,
+                            model=model,
+                            temperature=temperature,
+                            top_p=top_p,
+                            reasoning_effort=effort,
+                            stream=True,
                         )
 
-                    except UpstreamError as exc:
-                        fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
-                            _retry = True
-                            logger.warning(
-                                "console chat retry: attempt={}/{} status={} token={}...",
-                                attempt + 1, max_retries, exc.status, token[:8],
+                        try:
+                            yield ": heartbeat\n\n"
+                            async for event_type, data in stream_console_chat(
+                                token, payload, timeout_s=timeout_s
+                            ):
+                                tokens = adapter.feed(event_type, data)
+                                for tok in tokens:
+                                    chunk = make_stream_chunk(response_id, model, tok)
+                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+
+                            # 流结束，发送 final chunk
+                            usage_data = adapter.usage
+                            prompt_tokens = (
+                                usage_data.get("input_tokens", 0) if usage_data else
+                                estimate_prompt_tokens(messages)
                             )
+                            completion_tokens = (
+                                usage_data.get("output_tokens", 0) if usage_data else
+                                estimate_tokens(adapter.full_text)
+                            )
+                            usage = build_usage(prompt_tokens, completion_tokens)
+                            final = make_stream_chunk(
+                                response_id, model, "", is_final=True
+                            )
+                            final["usage"] = usage
+                            yield f"data: {orjson.dumps(final).decode()}\n\n"
+                            yield "data: [DONE]\n\n"
+                            success = True
+                            logger.info(
+                                "console chat stream completed: attempt={}/{} model={} tokens={}",
+                                attempt + 1, max_retries + 1, model,
+                                (usage_data or {}).get("total_tokens", "?"),
+                            )
+
+                        except UpstreamError as exc:
+                            fail_exc = exc
+                            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                                _retry = True
+                                logger.warning(
+                                    "console chat retry: attempt={}/{} status={} token={}...",
+                                    attempt + 1, max_retries, exc.status, token[:8],
+                                )
+                                # console.x.ai 429 是 team 级 RPM 限制:换 token 没用(同一 team),
+                                # 需短退避让窗口恢复。3s 既能恢复几 RPM 额度,又不会超过 NewAPI
+                                # 渠道测活的超时(默认 ~30s)。仅 429 生效,其它重试码立即换 token。
+                                if exc.status == 429:
+                                    await asyncio.sleep(3)
+                            else:
+                                logger.warning(
+                                    "console chat upstream failed: model={} status={} attempt={}/{}",
+                                    model, exc.status, attempt + 1, max_retries + 1,
+                                )
+                                raise
+
+                    finally:
+                        await directory.release(acct)
+                        kind = (
+                            FeedbackKind.SUCCESS if success
+                            else feedback_kind_for_error(fail_exc) if fail_exc
+                            else FeedbackKind.SERVER_ERROR
+                        )
+                        await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                        if success:
+                            asyncio.create_task(
+                                _quota_sync(token, selected_mode_id)
+                            ).add_done_callback(_log_task_exception)
                         else:
-                            logger.warning(
-                                "console chat upstream failed: model={} status={} attempt={}/{}",
-                                model, exc.status, attempt + 1, max_retries + 1,
-                            )
-                            raise
+                            asyncio.create_task(
+                                _fail_sync(token, selected_mode_id, fail_exc)
+                            ).add_done_callback(_log_task_exception)
 
-                finally:
-                    await directory.release(acct)
-                    kind = (
-                        FeedbackKind.SUCCESS if success
-                        else feedback_kind_for_error(fail_exc) if fail_exc
-                        else FeedbackKind.SERVER_ERROR
-                    )
-                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
-                    if success:
-                        asyncio.create_task(
-                            _quota_sync(token, selected_mode_id)
-                        ).add_done_callback(_log_task_exception)
-                    else:
-                        asyncio.create_task(
-                            _fail_sync(token, selected_mode_id, fail_exc)
-                        ).add_done_callback(_log_task_exception)
-
-                if success or not _retry:
-                    return
-                excluded.append(token)
+                    if success or not _retry:
+                        return
+                    excluded.append(token)
 
         return _run_stream()
 
     # ── Non-streaming path ────────────────────────────────────────────────────
-    excluded: list[str] = []
-    for attempt in range(max_retries + 1):
-        acct, selected_mode_id = await reserve_account(
-            directory,
-            spec,
-            now_s_override=now_s(),
-            exclude_tokens=excluded or None,
-        )
-        if acct is None:
-            raise RateLimitError("No available accounts for this model tier")
-
-        token = acct.token
-        success = False
-        fail_exc: BaseException | None = None
-        adapter = ConsoleStreamAdapter()
-
-        try:
-            payload = build_console_payload(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                top_p=top_p,
-                reasoning_effort=effort,
-                stream=True,  # 始终用流式，非流式在本地聚合
+    async with _console_limiter:
+        excluded: list[str] = []
+        for attempt in range(max_retries + 1):
+            acct, selected_mode_id = await reserve_account(
+                directory,
+                spec,
+                now_s_override=now_s(),
+                exclude_tokens=excluded or None,
             )
+            if acct is None:
+                raise RateLimitError("No available accounts for this model tier")
+
+            token = acct.token
+            success = False
+            fail_exc: BaseException | None = None
+            adapter = ConsoleStreamAdapter()
 
             try:
-                async for event_type, data in stream_console_chat(
-                    token, payload, timeout_s=timeout_s
-                ):
-                    adapter.feed(event_type, data)
+                payload = build_console_payload(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    top_p=top_p,
+                    reasoning_effort=effort,
+                    stream=True,  # 始终用流式，非流式在本地聚合
+                )
 
-                usage_data = adapter.usage
-                prompt_tokens = (
-                    usage_data.get("input_tokens", 0) if usage_data else
-                    estimate_prompt_tokens(messages)
-                )
-                completion_tokens = (
-                    usage_data.get("output_tokens", 0) if usage_data else
-                    estimate_tokens(adapter.full_text)
-                )
-                usage = build_usage(prompt_tokens, completion_tokens)
-                result = make_chat_response(
-                    model, adapter.full_text, response_id=response_id, usage=usage
-                )
-                success = True
-                logger.info(
-                    "console chat non-stream completed: model={} tokens={}",
-                    model, (usage_data or {}).get("total_tokens", "?"),
-                )
-                return result
+                try:
+                    async for event_type, data in stream_console_chat(
+                        token, payload, timeout_s=timeout_s
+                    ):
+                        adapter.feed(event_type, data)
 
-            except UpstreamError as exc:
-                fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
-                    logger.warning(
-                        "console chat non-stream retry: attempt={}/{} status={}",
-                        attempt + 1, max_retries, exc.status,
+                    usage_data = adapter.usage
+                    prompt_tokens = (
+                        usage_data.get("input_tokens", 0) if usage_data else
+                        estimate_prompt_tokens(messages)
                     )
-                    excluded.append(token)
-                    continue
-                raise
+                    completion_tokens = (
+                        usage_data.get("output_tokens", 0) if usage_data else
+                        estimate_tokens(adapter.full_text)
+                    )
+                    usage = build_usage(prompt_tokens, completion_tokens)
+                    result = make_chat_response(
+                        model, adapter.full_text, response_id=response_id, usage=usage
+                    )
+                    success = True
+                    logger.info(
+                        "console chat non-stream completed: model={} tokens={}",
+                        model, (usage_data or {}).get("total_tokens", "?"),
+                    )
+                    return result
 
-        finally:
-            await directory.release(acct)
-            kind = (
-                FeedbackKind.SUCCESS if success
-                else feedback_kind_for_error(fail_exc) if fail_exc
-                else FeedbackKind.SERVER_ERROR
-            )
-            await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
-            if success:
-                asyncio.create_task(
-                    _quota_sync(token, selected_mode_id)
-                ).add_done_callback(_log_task_exception)
-            else:
-                asyncio.create_task(
-                    _fail_sync(token, selected_mode_id, fail_exc)
-                ).add_done_callback(_log_task_exception)
+                except UpstreamError as exc:
+                    fail_exc = exc
+                    if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        logger.warning(
+                            "console chat non-stream retry: attempt={}/{} status={}",
+                            attempt + 1, max_retries, exc.status,
+                        )
+                        excluded.append(token)
+                        # console.x.ai 的 429 是 team 级 RPM 限制(窗口每秒衰减),
+                        # 实测 3s 后已能恢复 1 RPM 额度成功。仅对 429 生效。
+                        if exc.status == 429:
+                            await asyncio.sleep(3)
+                        continue
+                    raise
+
+            finally:
+                await directory.release(acct)
+                kind = (
+                    FeedbackKind.SUCCESS if success
+                    else feedback_kind_for_error(fail_exc) if fail_exc
+                    else FeedbackKind.SERVER_ERROR
+                )
+                await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                if success:
+                    asyncio.create_task(
+                        _quota_sync(token, selected_mode_id)
+                    ).add_done_callback(_log_task_exception)
+                else:
+                    asyncio.create_task(
+                        _fail_sync(token, selected_mode_id, fail_exc)
+                    ).add_done_callback(_log_task_exception)
 
     raise RateLimitError("No available accounts after retries")
 

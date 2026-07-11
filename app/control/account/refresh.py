@@ -673,6 +673,27 @@ class AccountRefreshService:
             logger.info("console expired accounts auto-recovered: count={}", count)
         return count
 
+    async def recover_transient401_expired_accounts(self) -> int:
+        """自动恢复因瞬时401而 EXPIRED 的账号。
+
+        恢复条件（AND）：
+        - status = EXPIRED
+        - state_reason = invalid_credentials（由401触发）
+        - expired_at <= now - 5 分钟（冷却期）
+
+        逻辑：
+        这些账号是因不含 invalid-credentials body 的401而被标记 EXPIRED 的。
+        它们很可能仍然有效（如 Cloudflare 挑战、瞬时认证故障）。
+        定期将它们恢复到 ACTIVE，让下次请求自然验证。
+
+        Returns:
+            恢复的账号数量。
+        """
+        count = await self._repo.recover_transient401_expired_accounts()
+        if count > 0:
+            logger.info("transient 401 expired accounts auto-recovered: count={}", count)
+        return count
+
     async def refresh_cli_tokens(self) -> int:
         """Refresh expired CLI OAuth tokens across all accounts.
 
@@ -685,8 +706,19 @@ class AccountRefreshService:
         """
         from app.platform.runtime.clock import now_ms
         from app.dataplane.reverse.protocol.xai_oauth import refresh_cli_token
+        from app.dataplane.proxy import get_proxy_runtime
         from app.products.openai.cli_chat import _cli_token_cache
         from .commands import AccountPatch, ListAccountsQuery
+
+        # Resolve proxy URL so OAuth can reach auth.x.ai through the egress proxy.
+        proxy_url = ""
+        try:
+            proxy_rt = await get_proxy_runtime()
+            if proxy_rt.has_proxy:
+                lease = await proxy_rt.acquire()
+                proxy_url = lease.proxy_url or ""
+        except Exception as exc:
+            logger.debug("cli refresh: proxy acquisition failed: {}", exc)
 
         now = now_ms()
         refreshed = 0
@@ -708,7 +740,7 @@ class AccountRefreshService:
                 continue
 
             try:
-                result = await refresh_cli_token(refresh_tok)
+                result = await refresh_cli_token(refresh_tok, proxy_url=proxy_url)
             except Exception as exc:
                 logger.warning("cli token refresh failed: token={}... error={}", record.token[:8], exc)
                 continue
@@ -747,7 +779,18 @@ class AccountRefreshService:
         """
         from app.platform.runtime.clock import now_ms
         from app.dataplane.reverse.protocol.xai_oauth import acquire_cli_token
-        from .commands import AccountPatch
+        from app.dataplane.proxy import get_proxy_runtime
+        from .commands import AccountPatch, ListAccountsQuery
+
+        # Resolve proxy URL so OAuth can reach auth.x.ai through the egress proxy.
+        proxy_url = ""
+        try:
+            proxy_rt = await get_proxy_runtime()
+            if proxy_rt.has_proxy:
+                lease = await proxy_rt.acquire()
+                proxy_url = lease.proxy_url or ""
+        except Exception as exc:
+            logger.debug("cli fill: proxy acquisition failed: {}", exc)
 
         filled = 0
         skipped = 0
@@ -769,7 +812,7 @@ class AccountRefreshService:
 
             # Rate-limit: max 10 OAuth calls per minute
             try:
-                result = await acquire_cli_token(record.token)
+                result = await acquire_cli_token(record.token, proxy_url=proxy_url)
             except Exception as exc:
                 logger.warning("cli fill acquire failed: token={}... error={}", record.token[:8], exc)
                 continue

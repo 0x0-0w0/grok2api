@@ -63,7 +63,7 @@ def _headers(sso: str, cf: str = "", **kw) -> dict:
     return h
 
 
-async def acquire_cli_token(sso: str, cf: str = "") -> dict:
+async def acquire_cli_token(sso: str, cf: str = "", *, proxy_url: str = "") -> dict:
     """Run full OAuth2 PKCE flow and return token dict.
 
     Returns a dict with keys: ``access_token``, ``refresh_token``,
@@ -88,7 +88,11 @@ async def acquire_cli_token(sso: str, cf: str = "") -> dict:
     }
     auth_url = "https://auth.x.ai/oauth2/authorize?" + urlencode(params)
 
-    async with AsyncSession(impersonate=BROWSER) as session:
+    session_kwargs: dict = {"impersonate": BROWSER}
+    if proxy_url:
+        session_kwargs["proxy"] = proxy_url
+
+    async with AsyncSession(**session_kwargs) as session:
         # Step 1: GET auth.x.ai → 302/303 redirect
         h1 = {
             "User-Agent": (
@@ -222,7 +226,7 @@ async def acquire_cli_token(sso: str, cf: str = "") -> dict:
     }
 
 
-async def refresh_cli_token(refresh_token: str) -> dict | None:
+async def refresh_cli_token(refresh_token: str, *, proxy_url: str = "") -> dict | None:
     """Refresh an expired CLI access_token using the stored refresh_token.
 
     Returns the same dict shape as ``acquire_cli_token``, or ``None`` on failure.
@@ -232,7 +236,11 @@ async def refresh_cli_token(refresh_token: str) -> dict | None:
 
     logger.debug("xai oauth refresh: refresh_token={}...", refresh_token[:8])
 
-    async with AsyncSession(impersonate=BROWSER) as session:
+    session_kwargs: dict = {"impersonate": BROWSER}
+    if proxy_url:
+        session_kwargs["proxy"] = proxy_url
+
+    async with AsyncSession(**session_kwargs) as session:
         try:
             r = await session.post(
                 "https://auth.x.ai/oauth2/token",
